@@ -368,25 +368,23 @@ async fn run(
                         ref endpoint,
                         ..
                     } => {
-                        let cache = PeerEndpointCache {
-                            peer_id: peer_id.clone(),
-                            address: endpoint.get_remote_address().clone(),
-                        };
-                        // if num_established.get() == 1 {
-                        //     info!("Connected to peer {} with {}", peer_id, &cache.address);
-                        // }
-                        let d = endpoint.get_remote_address();
+                        let mut d = endpoint.get_remote_address().clone();
                         // We only care about IP and protocol port, ignoring the p2p suffix
-                        if d.iter().count() < 3 {
+                        // However, the endpoint with p2p protocol is the one we actually connected to.
+                        if d.iter().count() > 2 {
+                            let _ = d.pop();
+                            let cache = PeerEndpointCache {
+                                peer_id: peer_id.clone(),
+                                address: d.clone(),
+                            };
                             debug!("Adding endpoint {d} to cache");
                             if !unique_endpoints.insert(cache.clone()) {
                                 // The item is already present in the set (duplicate)
                                 debug!("endpoint {d} already in cache, reordering");
                                 endpoint_cache.retain(|existing_item| existing_item != &cache);
-                            } else {
-                                info!("Connected to peer {} with {}", peer_id, &cache.address);
                             }
                             endpoint_cache.push_front(cache);
+                            info!("Connected to peer {} with {}", peer_id, d);
                         }
                         None
                     }
