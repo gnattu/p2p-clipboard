@@ -662,7 +662,7 @@ fn create_kademlia_behavior(local_peer_id: PeerId) -> kad::Behaviour<MemoryStore
 
 fn create_identify_behavior(local_public_key: PublicKey) -> identify::Behaviour {
     identify::Behaviour::new(identify::Config::new(
-        "/ipfs/1.0.0".into(), // FIXME: For some historical reason we have to use /ipfs as protocol string
+        "/p2pclipboard/1.0.0".into(),
         local_public_key,
     ))
 }
