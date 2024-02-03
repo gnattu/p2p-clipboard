@@ -41,7 +41,7 @@ struct PeerEndpointCache {
 }
 
 #[derive(Default, Clone)]
-pub struct CompressionTransform;
+struct CompressionTransform;
 
 // Not used directly, we will derive new keys using machine ID from this key.
 // We have to do this to have a stable Peer ID when no key is specified by the user.
