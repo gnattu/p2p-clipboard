@@ -9,7 +9,7 @@ use libp2p::{
     identify,
     identity::{Keypair, PublicKey},
     kad::{self, store::MemoryStore},
-    multiaddr,
+    multiaddr::Protocol,
     swarm::{self, NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm,
 };
@@ -24,7 +24,8 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     time::{Duration, SystemTime},
 };
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(NetworkBehaviour)]
 struct P2pClipboardBehaviour {
@@ -34,10 +35,16 @@ struct P2pClipboardBehaviour {
     mdns: mdns::tokio::Behaviour,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq, Debug)]
 struct PeerEndpointCache {
     peer_id: PeerId,
     address: Multiaddr,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq, Debug)]
+struct ConnectionRetryTask {
+    target: PeerEndpointCache,
+    retry_count: usize,
 }
 
 #[derive(Default, Clone)]
@@ -46,6 +53,34 @@ struct CompressionTransform;
 // Not used directly, we will derive new keys using machine ID from this key.
 // We have to do this to have a stable Peer ID when no key is specified by the user.
 const ID_SEED: [u8; 118] = hex!("2d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4d43344341514177425159444b3256774243494549444c3968565958485271304f48386f774a72363169416a45385a52614263363254373761723564397339670a2d2d2d2d2d454e442050524956415445204b45592d2d2d2d2d");
+
+async fn retry_waiting_thread(
+    mut rx: UnboundedReceiver<ConnectionRetryTask>,
+    callback: UnboundedSender<PeerEndpointCache>,
+    mut shutdown: oneshot::Receiver<()>,
+) {
+    async fn delayed_callback(
+        callback: UnboundedSender<PeerEndpointCache>,
+        delay: Duration,
+        task: PeerEndpointCache,
+    ) {
+        tokio::time::sleep(delay).await;
+        let _ = callback.send(task);
+    }
+    loop {
+        tokio::select! {
+            Some(task) = rx.recv() => {
+                let seconds = task.retry_count.checked_pow(2).unwrap_or(0) + 1;
+                let payload = task.target;
+                tokio::spawn(delayed_callback(callback.clone(), Duration::from_secs(seconds as u64), payload));
+            },
+            _ = &mut shutdown => {
+                debug!("Connection retry waiting thread shutdown received");
+                return;
+            },
+        }
+    }
+}
 
 pub async fn start_network(
     rx: mpsc::Receiver<String>,
@@ -177,9 +212,26 @@ pub async fn start_network(
             None
         }
     };
-
-    let swarm_handle = tokio::spawn(run(swarm, gossipsub_topic, rx, tx, boot_node));
+    let (retry_queue_tx, retry_queue_rx) = mpsc::unbounded_channel::<ConnectionRetryTask>();
+    let (retry_callback_queue_tx, retry_callback_queue_rx) =
+        mpsc::unbounded_channel::<PeerEndpointCache>();
+    let (shutdown_channel_tx, shutdown_channel_rx) = oneshot::channel::<()>();
+    let _retry_handle = tokio::spawn(retry_waiting_thread(
+        retry_queue_rx,
+        retry_callback_queue_tx,
+        shutdown_channel_rx,
+    ));
+    let swarm_handle = tokio::spawn(run(
+        swarm,
+        gossipsub_topic,
+        rx,
+        tx,
+        boot_node,
+        retry_queue_tx,
+        retry_callback_queue_rx,
+    ));
     swarm_handle.await?;
+    let _ = shutdown_channel_tx.send(());
     Ok(())
 }
 
@@ -189,6 +241,8 @@ async fn run(
     mut rx: mpsc::Receiver<String>,
     tx: mpsc::Sender<String>,
     boot_node: Option<PeerEndpointCache>,
+    retry_queue_tx: UnboundedSender<ConnectionRetryTask>,
+    mut retry_callback_queue_rx: UnboundedReceiver<PeerEndpointCache>,
 ) {
     // We have to cache all endpoints so that we can reconnect to the p2p networks when our IP has changed.
     let mut endpoint_cache: VecDeque<PeerEndpointCache> = VecDeque::new();
@@ -196,6 +250,8 @@ async fn run(
     let mut current_listen_addresses: HashSet<Multiaddr> = HashSet::new();
     // We also need to cache the announced identity for each node, because they will be different from what we actually connects.
     let mut announced_identities: HashMap<PeerId, Vec<Multiaddr>> = HashMap::new();
+    let mut failing_connections: HashMap<PeerEndpointCache, ConnectionRetryTask> = HashMap::new();
+
     let mut t = SystemTime::now();
     let mut sleep;
     loop {
@@ -205,7 +261,7 @@ async fn run(
                 Some(message) = rx.recv() => {
                     debug!("Received local clipboard: {}", message.clone());
                     Some((gossipsub_topic.clone(), message.clone()))
-                }
+                },
                 event = swarm.select_next_some() => match event {
                     SwarmEvent::Behaviour(P2pClipboardBehaviourEvent::Gossipsub(ref gossip_event)) => {
                         if let gossipsub::Event::Message {
@@ -253,7 +309,7 @@ async fn run(
                                 }
                                 for addr in listen_addrs {
                                     debug!("received addr {addr} trough identify");
-                                    if addr.iter().collect::<Vec<_>>()[0] != multiaddr::Protocol::Ip4(Ipv4Addr::new(127, 0, 0, 1)) {
+                                    if !is_multiaddr_local(addr) {
                                         swarm.behaviour_mut().kademlia.add_address(&peer_id, addr.clone());
                                     }
                                 }
@@ -304,7 +360,7 @@ async fn run(
                         info!("Local node is listening on {address}");
                         let non_local_addr_count = current_listen_addresses
                             .iter()
-                            .filter(|&addr| addr.iter().collect::<Vec<_>>()[0]!=multiaddr::Protocol::Ip4(Ipv4Addr::new(127, 0, 0, 1)))
+                            .filter(|&addr| !is_multiaddr_local(addr))
                             .count();
                         current_listen_addresses.insert(address.clone());
                         let mut peers_to_push: Vec<PeerId> = Vec::new();
@@ -319,24 +375,8 @@ async fn run(
                             info!("No boot node specified. Waiting for connection.");
                         } else if connected_peers_count == 0 || non_local_addr_count == 0 {
                             debug!("No connected peers or recovered from no network, we need to manually re-dial to the boot node");
-                            let mut use_fallback = false;
                             if let Some(real_boot_node) = boot_node.as_ref() {
-                                let res = swarm.dial(real_boot_node.address.clone());
-                                if let Err(_) = res {
-                                    use_fallback = true;
-                                }
-                            } else {
-                                use_fallback = true;
-                            }
-                            if use_fallback {
-                                debug!("Boot node not accessible, try all known peers.");
-                                for endpoint in endpoint_cache.clone() {
-                                    let res = swarm.dial(endpoint.clone().address);
-                                    if let Ok(_) = res {
-                                        debug!("Dial successful in fallback");
-                                        break;
-                                    }
-                                }
+                                let _ = swarm.dial(real_boot_node.address.clone());
                             }
                         }
                         let _ = swarm.behaviour_mut().kademlia.bootstrap();
@@ -347,7 +387,7 @@ async fn run(
                         current_listen_addresses.remove(address);
                         let non_local_addr_count = current_listen_addresses
                             .iter()
-                            .filter(|&addr| addr.iter().collect::<Vec<_>>()[0]!=multiaddr::Protocol::Ip4(Ipv4Addr::new(127, 0, 0, 1)))
+                            .filter(|&addr| !is_multiaddr_local(addr))
                             .count();
                         let mut peers_to_push: Vec<PeerId> = Vec::new();
                         if let Some(boot_node_clone) = boot_node.as_ref() {
@@ -355,10 +395,18 @@ async fn run(
                         }
                         swarm.behaviour_mut().identify.push(peers_to_push.clone());
                         if non_local_addr_count > 0 {
-                            // Because when main address is teared down, the network usually needs some time to recover
-                            tokio::time::sleep(Duration::from_secs(1)).await;
                             if let Some(real_boot_node) = boot_node.as_ref() {
-                                let _ = swarm.dial(real_boot_node.address.clone());
+                                // Because when main address is teared down, the network usually needs some time to recover
+                                // We send it to the retry queue directly
+                                let retry_task = match failing_connections.get(&real_boot_node) {
+                                    Some(task) => task.clone(),
+                                    None => ConnectionRetryTask {
+                                        target: real_boot_node.clone(),
+                                        retry_count: 0,
+                                    }
+                                };
+                                failing_connections.insert(real_boot_node.clone(), retry_task.clone());
+                                let _ = retry_queue_tx.send(retry_task);
                             }
                         }
                         None
@@ -368,24 +416,22 @@ async fn run(
                         ref endpoint,
                         ..
                     } => {
-                        let mut d = endpoint.get_remote_address().clone();
                         // We only care about IP and protocol port, ignoring the p2p suffix
-                        // However, the endpoint with p2p protocol is the one we actually connected to.
-                        if d.iter().count() > 2 {
-                            let _ = d.pop();
-                            let cache = PeerEndpointCache {
-                                peer_id: peer_id.clone(),
-                                address: d.clone(),
-                            };
-                            debug!("Adding endpoint {d} to cache");
-                            if !unique_endpoints.insert(cache.clone()) {
-                                // The item is already present in the set (duplicate)
-                                debug!("endpoint {d} already in cache, reordering");
-                                endpoint_cache.retain(|existing_item| existing_item != &cache);
-                            }
-                            endpoint_cache.push_front(cache);
-                            info!("Connected to peer {} with {}", peer_id, d);
+                        let real_address = get_non_p2p_multiaddr(endpoint.get_remote_address().clone());
+                        let cache = PeerEndpointCache {
+                            peer_id: peer_id.clone(),
+                            address: real_address.clone(),
+                        };
+                        debug!("Adding endpoint {real_address} to cache");
+                        if !unique_endpoints.insert(cache.clone()) {
+                            // The item is already present in the set (duplicate)
+                            debug!("endpoint {real_address} already in cache, reordering");
+                            endpoint_cache.retain(|existing_item| existing_item != &cache);
+                        } else {
+                            info!("Connected to peer {}", peer_id);
                         }
+                        failing_connections.retain(|c, _| c.peer_id != *peer_id);
+                        endpoint_cache.push_front(cache);
                         None
                     }
                     SwarmEvent::ConnectionClosed { ref peer_id, ref cause,ref endpoint, ref num_established, .. } => {
@@ -405,37 +451,21 @@ async fn run(
                                 ConnectionError::IO(_io_error) => {
                                     // Handle IO error
                                     // An IO error usually means a network problem occurred on local side, and we will try to re-connect.
-                                    let mut retry_count = 0;
-                                    let max_retries = 3;
                                     let addr = endpoint.get_remote_address();
-                                    while endpoint.is_dialer() {
-                                        match swarm.dial(addr.clone()) {
-                                            Ok(()) => {
-                                                // Dial successful, break out of the loop
-                                                let _ = swarm.behaviour_mut().kademlia.bootstrap();
-                                                debug!("Dial successful!");
-                                                break;
+                                    if endpoint.is_dialer() {
+                                        let failed_connection = PeerEndpointCache {
+                                            address: addr.clone(),
+                                            peer_id: peer_id.clone(),
+                                        };
+                                        let retry_task = match failing_connections.get(&failed_connection) {
+                                            Some(task) => task.clone(),
+                                            None => ConnectionRetryTask {
+                                                target: failed_connection.clone(),
+                                                retry_count: 0,
                                             }
-                                            Err(dial_err) => {
-                                                match dial_err {
-                                                    swarm::DialError::DialPeerConditionFalse(swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing) => {
-                                                        debug!("Stop trying reconnect as we already have a connection going on");
-                                                        break;
-                                                    }
-                                                    _ => {
-                                                        error!("Dial Error: {}", dial_err);
-                                                        retry_count += 1;
-                                                        if retry_count >= max_retries {
-                                                            warn!("Max retries reached. Giving up.");
-                                                            break;
-                                                        }
-                                                        let wait_duration = Duration::from_secs(1);
-                                                        warn!("Retrying in {} seconds...", wait_duration.as_secs());
-                                                        tokio::time::sleep(wait_duration).await;
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        };
+                                        failing_connections.insert(failed_connection, retry_task.clone());
+                                        let _ = retry_queue_tx.send(retry_task);
                                     }
                                 }
                                 _ => {}
@@ -449,18 +479,20 @@ async fn run(
                         connection_id,
                     } => {
                         debug!("OutgoingConnectionError to {peer_id:?} on {connection_id:?} - {error:?}");
-                        // we need to decide if this was a critical error and the peer should be removed from the routing table
+                        // We need to decide if this was a critical error and the peer should be removed from the routing table.
+                        // For a peer that has successfully connected but then disconnected, the SwarmEvent::ConnectionClosed handler handles that.
+                        // If the error goes here, it usually means we cannot connect to that peer with given address in the first place.
                         let should_clean_peer = match error {
                             swarm::DialError::Transport(errors) => {
                                 // Most of the transport error comes from local end and the remote peer should not be removed.
                                 // Even if it is really the remote end, it is hard to tell because if we have multiple
                                 // IP addresses and not all of them is able to connect to the remote endpoint, we may still
                                 // have other IP address that is able to connect to that peer.
+                                // To mitigate that, only remove that specific endpoint instead of everything about that peer.
                                 debug!("Dial errors len : {:?}", errors.len());
                                 let mut non_recoverable = false;
-                                for (_addr, err) in errors {
+                                for (addr, err) in errors {
                                     debug!("OutgoingTransport error : {err:?}");
-
                                     match err {
                                         libp2p::TransportError::MultiaddrNotSupported(addr) => {
                                             error!("Multiaddr not supported : {addr:?}");
@@ -470,20 +502,36 @@ async fn run(
                                             non_recoverable = true
                                         }
                                         libp2p::TransportError::Other(err) => {
-                                            let should_hold_and_retry = ["NetworkUnreachable"];
+                                            let should_hold_and_retry = ["NetworkUnreachable", "Timeout"];
                                             if let Some(inner) = err.get_ref() {
                                                 let error_msg = format!("{inner:?}");
                                                 debug!("Problematic error encountered: {inner:?}");
-                                                // This is not the best way to match an Error, but the Error we get here is very complicated, like:
-                                                // `Other(Custom { kind: Other, error: Timeout })`
-                                                // `Other(Left(Left(Os { code: 51, kind: NetworkUnreachable, message: "Network is unreachable" })`
-                                                // `Other(Left(Left(Os { code: 61, kind: ConnectionRefused, message: "Connection refused" })`
-                                                // Makes appropriate matching very hard if we want to match a specific type of error.
-                                                if should_hold_and_retry.iter().any(|err| error_msg.contains(err)) {
-                                                    if let Some(peer) = peer_id {
-                                                        warn!("Dial {peer} is scheduled for retry later");
-                                                        tokio::time::sleep(Duration::from_secs(1)).await;
-                                                        let _ = swarm.dial(peer.clone());
+                                                if let Some(peer) = peer_id {
+                                                    let failed_connection = PeerEndpointCache {
+                                                        address: addr.clone(),
+                                                        peer_id: peer.clone(),
+                                                    };
+                                                    // This is not the best way to match an Error, but the Error we get here is very complicated, like:
+                                                    // `Other(Custom { kind: Other, error: Timeout })`
+                                                    // `Other(Left(Left(Os { code: 51, kind: NetworkUnreachable, message: "Network is unreachable" })`
+                                                    // `Other(Left(Left(Os { code: 61, kind: ConnectionRefused, message: "Connection refused" })`
+                                                    // Makes appropriate matching very hard if we want to match a specific type of error.
+                                                    if should_hold_and_retry.iter().any(|err| error_msg.contains(err)) {
+                                                        let retry_task = match failing_connections.get(&failed_connection) {
+                                                            Some(task) => task.clone(),
+                                                            None => ConnectionRetryTask {
+                                                                target: failed_connection.clone(),
+                                                                retry_count: 0,
+                                                            }
+                                                        };
+                                                        failing_connections.insert(failed_connection, retry_task.clone());
+                                                        let _ = retry_queue_tx.send(retry_task);
+                                                    } else {
+                                                        // If we are not retrying, we should do some cleanup at this endpoint.
+                                                        unique_endpoints.retain(|endpoint| endpoint.address != *addr);
+                                                        endpoint_cache.retain(|endpoint| endpoint.address != *addr);
+                                                        failing_connections.remove(&failed_connection);
+                                                        swarm.behaviour_mut().kademlia.remove_address(peer, addr);
                                                     }
                                                 }
                                             };
@@ -546,6 +594,63 @@ async fn run(
                         None
                     },
                     _ => {None}
+                },
+                Some(failing_connection) = retry_callback_queue_rx.recv() => {
+                    if let Some(retry_task) = failing_connections.get_mut(&failing_connection) {
+                        // Perform some check to ensure doing a connection retry is reasonable
+                        let is_network_ok = {
+                            let non_local_listener_count = current_listen_addresses
+                                .iter()
+                                .filter(|&addr| !is_multiaddr_local(addr))
+                                .count();
+                            if swarm.connected_peers().count() > 0 {
+                                // If we already have other peers connected, we have at least one working network interface
+                                true
+                            } else if non_local_listener_count > 0 {
+                                // If we have a non-local listening address, let's hope that address will work.
+                                let link_local_listener_count = current_listen_addresses
+                                .iter()
+                                .filter(|&addr| is_multiaddr_link_local(addr))
+                                .count();
+                                // Special cases for link-local addresses.
+                                // Some OS services will use tun interfaces with link-local addresses which may confuses us.
+                                // Users could also have interfaces not configured.
+                                if is_multiaddr_link_local(&retry_task.target.address) {
+                                    if link_local_listener_count == 0 {
+                                        debug!("Connecting to link-local address {}, but we don't have any link-local addresses.", retry_task.target.address);
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                } else {
+                                    if link_local_listener_count < non_local_listener_count {
+                                        true
+                                    } else {
+                                        debug!("Connecting to address {}, but all we have are link-local addresses.", retry_task.target.address);
+                                        false
+                                    }
+                                }
+                            } else {
+                                false
+                            }
+                        };
+                        let is_task_ok = retry_task.retry_count <= 3;
+                        let already_connected = swarm.is_connected(&retry_task.target.peer_id);
+                        if !is_network_ok {
+                            debug!("We don't have working network connections yet, waiting.");
+                            let _ = retry_queue_tx.send(retry_task.clone());
+                        } else if !is_task_ok {
+                            error!("Connect to {} with {} failed too many times, give up.", retry_task.target.peer_id, retry_task.target.address);
+                            failing_connections.remove(&failing_connection);
+                        } else if already_connected {
+                            debug!("Already connected to {}, stop retrying.", retry_task.target.peer_id);
+                            failing_connections.remove(&failing_connection);
+                        } else {
+                            retry_task.retry_count += 1;
+                            let _ = swarm.dial(retry_task.target.address.clone());
+                        }
+                    }
+                    None
                 },
                 _ = &mut sleep => {
                     debug!("Long idle detected, doing periodic jobs");
@@ -715,4 +820,22 @@ fn parse_ipv4_with_port(input: Option<String>) -> Result<(Ipv4Addr, u16), &'stat
     } else {
         Err("Input is None")
     }
+}
+
+fn get_non_p2p_multiaddr(mut origin_addr: Multiaddr) -> Multiaddr {
+    while origin_addr.iter().count() > 2 {
+        let _ = origin_addr.pop();
+    }
+    return origin_addr;
+}
+
+fn is_multiaddr_link_local(addr: &Multiaddr) -> bool {
+    if let Protocol::Ip4(ip) = addr.iter().collect::<Vec<_>>()[0] {
+        return ip.is_link_local();
+    }
+    return false;
+}
+
+fn is_multiaddr_local(addr: &Multiaddr) -> bool {
+    addr.iter().collect::<Vec<_>>()[0] == Protocol::Ip4(Ipv4Addr::new(127, 0, 0, 1))
 }
