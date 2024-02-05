@@ -8,7 +8,7 @@ authors = ["gnattu"]
 
 [dependencies]
 arboard = "3.3.0"
-clipboard-master = "4.0.0-beta.4"
+clipboard-master = { git = "https://github.com/gnattu/clipboard-master.git" }
 tokio = { version = "1.35.1", features = ["full"] }
 async-task = "4.7.0"
 libp2p = { version = "0.53.2", features = ["tokio", "gossipsub", "macros", "identify", "kad", "tcp", "yamux"] }
