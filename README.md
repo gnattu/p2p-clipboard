@@ -8,7 +8,7 @@ Currently, it supports Windows, macOS, and partially Linux platforms. See the [L
 
 - Peer-to-Peer clipboard syncing: Sync clipboard contents across machines seamlessly.
 - Cross-platform compatibility: Works on Windows, macOS, and partially on Linux.
-- Decentralized and flexible architecture: No need for a centralized server, and works for most network topologies.
+- Decentralized and [flexible architecture](#network-flexibility): No need for a centralized server, and works for most network topologies.
 - Easy setup and usage: Zero config for basic usage.
 
 ## Installation
@@ -75,6 +75,25 @@ And then use `-k`or `--key` to use it.
 If not everyone in your local network is trusted by you, you can specify an extra pre-shared key to make your p2p network private. The pre-shared key can be any string and is specified with `-p` or `--psk`. Only nodes with the same pre-shared key can be peers with each other. This key won't be sent over network.
 
 If you plan to use p2p-clipboard in a public network, you may want to use `-n` or `--no-mdns` to disable peer discovery with mDNS and manually specify a boot node.
+
+## Network Flexibility
+
+The p2p-clipboard Network is designed to be highly flexible, allowing nodes to operate in various network configurations. Unlike many other projects, it does not require all nodes to be in the same network subnet, nor does it strictly demand direct IP access to other nodes.
+
+In the p2p-clipboard Network, when a peer receives a new message (the clipboard content) from another peer, it stores the message and forwards a copy to all other peers it is connected. This makes it possible to ensure seamless communication between nodes, even when direct IP connections are not possible.
+
+For example, PeerB can connect to both PeerA and PeerC. However, PeerA and PeerC do not have a direct IP connection between them. In this case, PeerB will automatically act as a forwarder, ensuring that information can still be transmitted between PeerA and PeerC.
+
+```
+   Peer A          Peer B          Peer C
++---------+     +---------+     +---------+
+|         |     |         |     |         |
+|    A    |<--->|    B    |<--->|    C    |
+|         |     |         |     |         |
++---------+     +---------+     +---------+
+```
+
+This will be useful when some peers in your network are behind some kind of NAT, which makes other peers unable to connect to them directly. In this case, a peer behind NAT will try to establish a connection from its side to all other peers in the network. However, we may also have some other peers which are also behind NAT, making it impossible to have direct connections between them. In this case, as long as there is a forwarding path available between these two peers, they can still have the clipboard synced.
 
 ## Limitation
 
