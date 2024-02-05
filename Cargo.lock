@@ -447,7 +447,7 @@ checksum = "702fc72eb24e5a1e48ce58027a675bc24edd52096d5397d4aea7c6dd9eca0bd1"
 [[package]]
 name = "clipboard-master"
 version = "4.0.0-beta.99"
-source = "git+https://github.com/gnattu/clipboard-master.git#62b18a49e501ada8a40b1bbfea58f235466c4063"
+source = "git+https://github.com/gnattu/clipboard-master.git#6f30992a718f292743226b86d6294508f3b27144"
 dependencies = [
  "arboard",
  "objc",
