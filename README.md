@@ -13,6 +13,11 @@ Currently, it supports Windows, macOS, and partially Linux platforms. See the [L
 
 ## Installation
 
+### GUI Wrappers
+
+- Tray application wrapper for Windows is available at [p2p-clipboard-windows](https://github.com/gnattu/p2p-clipboard-windows).
+- Menu bar application wrapper for macOS is available at [p2p-clipboard-mac](https://github.com/gnattu/p2p-clipboard-mac).
+
 ### Pre-built binaries:
 
 Pre-built binaries for Windows(x86-64), macOS(universal) and Linux(x86-64 and arm64) are available on the [release](./release) page.
