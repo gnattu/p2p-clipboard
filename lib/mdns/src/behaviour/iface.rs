@@ -21,25 +21,30 @@
 mod dns;
 mod query;
 
-use self::dns::{build_query, build_query_response, build_service_discovery_response};
-use self::query::MdnsPacket;
-use crate::behaviour::{socket::AsyncSocket, timer::Builder};
-use crate::Config;
-use futures::channel::mpsc;
-use futures::{SinkExt, StreamExt};
+use std::{
+    collections::VecDeque,
+    future::Future,
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+    pin::Pin,
+    sync::{Arc, RwLock},
+    task::{Context, Poll},
+    time::{Duration, Instant},
+};
+
+use futures::{channel::mpsc, SinkExt, StreamExt};
 use libp2p_core::Multiaddr;
 use libp2p_identity::PeerId;
 use libp2p_swarm::ListenAddresses;
 use socket2::{Domain, Socket, Type};
-use std::future::Future;
-use std::sync::{Arc, RwLock};
-use std::{
-    collections::VecDeque,
-    io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
-    pin::Pin,
-    task::{Context, Poll},
-    time::{Duration, Instant},
+
+use self::{
+    dns::{build_query, build_query_response, build_service_discovery_response},
+    query::MdnsPacket,
+};
+use crate::{
+    behaviour::{socket::AsyncSocket, timer::Builder},
+    Config,
 };
 use uuid::Uuid;
 
@@ -103,7 +108,6 @@ pub(crate) struct InterfaceState<U, T> {
     ttl: Duration,
     probe_state: ProbeState,
     local_peer_id: PeerId,
-    /// service_name Dynamically is computed with the PSK defined
     service_name: Vec<u8>,
     service_name_fqdn: String,
 }
@@ -170,13 +174,12 @@ where
             IpAddr::V6(_) => IpAddr::V6(crate::IPV6_MDNS_MULTICAST_ADDRESS),
         };
 
-        let id = match config.service_fingerprint.clone() {
-            Some(f) => Some(Uuid::new_v5(&Uuid::NAMESPACE_DNS, &f)),
-            None => None
-        };
-        let service_name = match id {
-            Some(uuid) => format!("_p2pclip-{}._udp.local", uuid.simple().to_string()),
-            None => "_p2pclipboard._udp.local".to_string()
+        let service_name = match config.service_fingerprint.as_deref() {
+            Some(seed) => {
+                let uuid = Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed);
+                format!("_p2pclip-{}._udp.local", uuid.simple())
+            }
+            None => crate::DEFAULT_SERVICE_NAME.to_string(),
         };
 
         Ok(Self {
@@ -194,8 +197,8 @@ where
             ttl: config.ttl,
             probe_state: Default::default(),
             local_peer_id,
-            service_name: service_name.clone().into_bytes(),
-            service_name_fqdn: format!("{}.", service_name),
+            service_name: service_name.as_bytes().to_vec(),
+            service_name_fqdn: format!("{service_name}."),
         })
     }
 
@@ -224,7 +227,8 @@ where
             // 1st priority: Low latency: Create packet ASAP after timeout.
             if this.timeout.poll_next_unpin(cx).is_ready() {
                 tracing::trace!(address=%this.addr, "sending query on iface");
-                this.send_buffer.push_back(build_query(&this.service_name));
+                this.send_buffer
+                    .push_back(build_query(&this.service_name));
                 tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
 
                 // Stop to probe when the initial interval reach the query interval
@@ -278,7 +282,13 @@ where
             match this
                 .recv_socket
                 .poll_read(cx, &mut this.recv_buffer)
-                .map_ok(|(len, from)| MdnsPacket::new_from_bytes(&this.recv_buffer[..len], from, &this.service_name_fqdn))
+                .map_ok(|(len, from)| {
+                    MdnsPacket::new_from_bytes(
+                        &this.recv_buffer[..len],
+                        from,
+                        &this.service_name_fqdn,
+                    )
+                })
             {
                 Poll::Ready(Ok(Ok(Some(MdnsPacket::Query(query))))) => {
                     tracing::trace!(
@@ -295,7 +305,7 @@ where
                             .unwrap_or_else(|e| e.into_inner())
                             .iter(),
                         this.ttl,
-                        &this.service_name
+                        &this.service_name,
                     ));
                     continue;
                 }
@@ -324,7 +334,11 @@ where
                     );
 
                     this.send_buffer
-                        .push_back(build_service_discovery_response(disc.query_id(), this.ttl, &this.service_name));
+                        .push_back(build_service_discovery_response(
+                            disc.query_id(),
+                            this.ttl,
+                            &this.service_name,
+                        ));
                     continue;
                 }
                 Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {

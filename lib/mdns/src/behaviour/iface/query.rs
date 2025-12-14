@@ -18,19 +18,23 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use super::dns;
-use crate::{META_QUERY_SERVICE_FQDN};
+use std::{
+    fmt,
+    net::SocketAddr,
+    str,
+    time::{Duration, Instant},
+};
+
 use hickory_proto::{
     op::Message,
     rr::{Name, RData},
 };
-use libp2p_core::{
-    address_translation,
-    multiaddr::{Multiaddr, Protocol},
-};
+use libp2p_core::multiaddr::{Multiaddr, Protocol};
 use libp2p_identity::PeerId;
-use std::time::Instant;
-use std::{fmt, net::SocketAddr, str, time::Duration};
+use libp2p_swarm::_address_translation;
+
+use super::dns;
+use crate::META_QUERY_SERVICE_FQDN;
 
 /// A valid mDNS packet received by the service.
 #[derive(Debug)]
@@ -48,11 +52,15 @@ impl MdnsPacket {
         buf: &[u8],
         from: SocketAddr,
         service_name_fqdn: &str,
-    ) -> Result<Option<MdnsPacket>, hickory_proto::error::ProtoError> {
+    ) -> Result<Option<MdnsPacket>, hickory_proto::ProtoError> {
         let packet = Message::from_vec(buf)?;
 
         if packet.query().is_none() {
-            return Ok(Some(MdnsPacket::Response(MdnsResponse::new(&packet, from, service_name_fqdn))));
+            return Ok(Some(MdnsPacket::Response(MdnsResponse::new(
+                &packet,
+                from,
+                service_name_fqdn,
+            ))));
         }
 
         if packet
@@ -71,7 +79,8 @@ impl MdnsPacket {
             .iter()
             .any(|q| q.name().to_utf8() == META_QUERY_SERVICE_FQDN)
         {
-            // TODO: what if multiple questions, one with SERVICE_NAME and one with META_QUERY_SERVICE?
+            // TODO: what if multiple questions,
+            // one with SERVICE_NAME and one with META_QUERY_SERVICE?
             return Ok(Some(MdnsPacket::ServiceDiscovery(MdnsServiceDiscovery {
                 from,
                 query_id: packet.header().id(),
@@ -157,7 +166,7 @@ impl MdnsResponse {
                     return None;
                 }
 
-                let RData::PTR(record_value) = record.data()? else {
+                let RData::PTR(record_value) = record.data() else {
                     return None;
                 };
 
@@ -180,7 +189,7 @@ impl MdnsResponse {
                 let new_expiration = now + peer.ttl();
 
                 peer.addresses().iter().filter_map(move |address| {
-                    let new_addr = address_translation(address, &observed)?;
+                    let new_addr = _address_translation(address, &observed)?;
                     let new_addr = new_addr.with_p2p(*peer.id()).ok()?;
 
                     Some((*peer.id(), new_addr, new_expiration))
@@ -239,7 +248,7 @@ impl MdnsPeer {
                     return None;
                 }
 
-                if let Some(RData::TXT(ref txt)) = add_record.data() {
+                if let RData::TXT(ref txt) = add_record.data() {
                     Some(txt)
                 } else {
                     None

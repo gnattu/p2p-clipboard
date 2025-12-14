@@ -20,12 +20,13 @@
 
 //! (M)DNS encoding and decoding on top of the `dns_parser` library.
 
-use crate::{META_QUERY_SERVICE};
+use std::{borrow::Cow, cmp, error, fmt, str, time::Duration};
+
 use libp2p_core::Multiaddr;
 use libp2p_identity::PeerId;
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-use std::{borrow::Cow, cmp, error, fmt, str, time::Duration};
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
+
+use crate::META_QUERY_SERVICE;
 
 /// DNS TXT records can have up to 255 characters as a single string value.
 ///
@@ -70,7 +71,7 @@ pub(crate) fn decode_character_string(mut from: &[u8]) -> Result<Cow<'_, [u8]>, 
 
 /// Builds the binary representation of a DNS query to send on the network.
 pub(crate) fn build_query(service_name: &[u8]) -> MdnsPacket {
-    let mut out = Vec::with_capacity(21);
+    let mut out = Vec::with_capacity(33 + service_name.len());
 
     // Program-generated transaction ID; unused by our implementation.
     append_u16(&mut out, rand::random());
@@ -137,7 +138,13 @@ pub(crate) fn build_query_response<'a>(
         }
 
         if records.len() == MAX_RECORDS_PER_PACKET {
-            packets.push(query_response_packet(id, &peer_name_bytes, &records, ttl, service_name));
+            packets.push(query_response_packet(
+                id,
+                &peer_name_bytes,
+                &records,
+                ttl,
+                service_name,
+            ));
             records.clear();
         }
     }
@@ -145,7 +152,13 @@ pub(crate) fn build_query_response<'a>(
     // If there are still unpacked records, i.e. if the number of records is not
     // a multiple of `MAX_RECORDS_PER_PACKET`, create a final packet.
     if !records.is_empty() {
-        packets.push(query_response_packet(id, &peer_name_bytes, &records, ttl, service_name));
+        packets.push(query_response_packet(
+            id,
+            &peer_name_bytes,
+            &records,
+            ttl,
+            service_name,
+        ));
     }
 
     // If no packets have been built at all, because `addresses` is empty,
@@ -164,12 +177,16 @@ pub(crate) fn build_query_response<'a>(
 }
 
 /// Builds the response to a service discovery DNS query.
-pub(crate) fn build_service_discovery_response(id: u16, ttl: Duration, service_name: &[u8]) -> MdnsPacket {
+pub(crate) fn build_service_discovery_response(
+    id: u16,
+    ttl: Duration,
+    service_name: &[u8],
+) -> MdnsPacket {
     // Convert the TTL into seconds.
     let ttl = duration_to_secs(ttl);
 
     // This capacity was determined empirically.
-    let mut out = Vec::with_capacity(39);
+    let mut out = Vec::with_capacity(69);
 
     append_u16(&mut out, id);
     // 0x84 flag for an answer.
@@ -203,7 +220,13 @@ pub(crate) fn build_service_discovery_response(id: u16, ttl: Duration, service_n
 }
 
 /// Constructs an MDNS query response packet for an address lookup.
-fn query_response_packet(id: u16, peer_id: &[u8], records: &[Vec<u8>], ttl: u32, service_name: &[u8]) -> MdnsPacket {
+fn query_response_packet(
+    id: u16,
+    peer_id: &[u8],
+    records: &[Vec<u8>],
+    ttl: u32,
+    service_name: &[u8],
+) -> MdnsPacket {
     let mut out = Vec::with_capacity(records.len() * MAX_TXT_RECORD_SIZE);
 
     append_u16(&mut out, id);
@@ -243,7 +266,7 @@ fn duration_to_secs(duration: Duration) -> u32 {
     let secs = duration
         .as_secs()
         .saturating_add(u64::from(duration.subsec_nanos() > 0));
-    cmp::min(secs, From::from(u32::max_value())) as u32
+    cmp::min(secs, From::from(u32::MAX)) as u32
 }
 
 /// Appends a big-endian u32 to `out`.
@@ -289,7 +312,6 @@ fn generate_peer_name() -> Vec<u8> {
 /// Panics if `name` has a zero-length component or a component that is too long.
 /// This is fine considering that this function is not public and is only called in a controlled
 /// environment.
-///
 fn append_qname(out: &mut Vec<u8>, name: &[u8]) {
     debug_assert!(name.is_ascii());
 

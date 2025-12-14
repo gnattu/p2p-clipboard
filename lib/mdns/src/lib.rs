@@ -28,10 +28,8 @@
 //!
 //! # Usage
 //!
-//! This crate provides a `Mdns` and `TokioMdns`, depending on the enabled features, which
-//! implements the `NetworkBehaviour` trait. This struct will automatically discover other
+//! This crate provides `TokioMdns` which implements the `NetworkBehaviour` trait. This struct will automatically discover other
 //! libp2p nodes on the local network.
-//!
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
@@ -39,17 +37,11 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 mod behaviour;
-pub use crate::behaviour::{Behaviour, Event};
-
 #[cfg(feature = "tokio")]
 pub use crate::behaviour::tokio;
+pub use crate::behaviour::{Behaviour, Event};
 
-/// The DNS service name for all libp2p peers used to query for addresses.
-/// Now computed dynamically in InterfaceState
-//const SERVICE_NAME: &[u8] = b"_p2pclipboard._udp.local";
-/// `SERVICE_NAME` as a Fully Qualified Domain Name.
-/// Now computed dynamically in InterfaceState
-//const SERVICE_NAME_FQDN: &str = "_p2pclipboard._udp.local.";
+pub(crate) const DEFAULT_SERVICE_NAME: &str = "_p2pclipboard._udp.local";
 /// The meta query for looking up the `SERVICE_NAME`.
 const META_QUERY_SERVICE: &[u8] = b"_services._dns-sd._udp.local";
 /// `META_QUERY_SERVICE` as a Fully Qualified Domain Name.
@@ -71,13 +63,14 @@ pub struct Config {
     pub query_interval: Duration,
     /// Use IPv6 instead of IPv4.
     pub enable_ipv6: bool,
-    /// When Set to true, all mDNS operation will become nop
+    /// When set to true, all mDNS operation will be no-op.
     pub disabled: bool,
-    /// User defined Service fingerprint.
-    /// If set, a 128bit UUID derived from this seed will be appended to mdns service name,
-    /// preventing services with different seed.
-    /// Should not use sensitive information directly as trivial hashing used for UUID generation is not secure.
-    /// Use some high-entropy hashing first if used with sensitive information.
+    /// Optional service fingerprint.
+    ///
+    /// If set, a 128bit UUID derived from this seed will be appended to the mDNS service name,
+    /// preventing discovery across different fingerprints.
+    ///
+    /// Do not use sensitive information directly. UUID v5 is not a secure hash.
     pub service_fingerprint: Option<Vec<u8>>,
 }
 
@@ -88,7 +81,7 @@ impl Default for Config {
             query_interval: Duration::from_secs(5 * 60),
             enable_ipv6: false,
             disabled: false,
-            service_fingerprint: None
+            service_fingerprint: None,
         }
     }
 }

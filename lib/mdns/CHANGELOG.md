@@ -1,3 +1,13 @@
+## 0.48.0
+
+- Sync upstream `libp2p-mdns` `0.48.0`.
+- Keep p2p-clipboard fork behavior: `Config::disabled` and `Config::service_fingerprint` (dynamic service name, default `_p2pclipboard._udp.local`).
+
+## 0.47.0
+
+- Emit `ToSwarm::NewExternalAddrOfPeer` on discovery.
+- Upgrade `hickory-proto`.
+
 ## 0.46.0
 
 - Fork from upstream, tweaked for p2p-clipboard
