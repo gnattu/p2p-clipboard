@@ -54,6 +54,31 @@ struct CompressionTransform;
 // We have to do this to have a stable Peer ID when no key is specified by the user.
 const ID_SEED: [u8; 118] = hex!("2d2d2d2d2d424547494e2050524956415445204b45592d2d2d2d2d0a4d43344341514177425159444b3256774243494549444c3968565958485271304f48386f774a72363169416a45385a52614263363254373761723564397339670a2d2d2d2d2d454e442050524956415445204b45592d2d2d2d2d");
 
+impl gossipsub::DataTransform for CompressionTransform {
+    fn inbound_transform(
+        &self,
+        raw_message: gossipsub::RawMessage,
+    ) -> Result<gossipsub::Message, std::io::Error> {
+        let buf: Vec<u8> = zstd::decode_all(&*raw_message.data)?;
+        Ok(gossipsub::Message {
+            source: raw_message.source,
+            data: buf,
+            sequence_number: raw_message.sequence_number,
+            topic: raw_message.topic,
+        })
+    }
+
+    fn outbound_transform(
+        &self,
+        _topic: &gossipsub::TopicHash,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        let compressed_bytes = zstd::encode_all(&*data, 0)?;
+        debug!("Compressed size {}", compressed_bytes.len());
+        Ok(compressed_bytes)
+    }
+}
+
 async fn retry_waiting_thread(
     mut rx: UnboundedReceiver<ConnectionRetryTask>,
     callback: UnboundedSender<PeerEndpointCache>,
@@ -281,6 +306,7 @@ async fn run(
                     SwarmEvent::Behaviour(P2pClipboardBehaviourEvent::Identify(ref identify_event)) => {
                         match identify_event {
                             identify::Event::Received {
+                                connection_id: _,
                                 peer_id,
                                 info:
                                 identify::Info {
@@ -334,7 +360,7 @@ async fn run(
                                     if !peers.is_empty() {
                                         debug!("Query finished with closest peers: {:#?}", peers);
                                         for peer in peers {
-                                            debug!("Got peer {peer}");
+                                            debug!("Got peer {:?}", peer);
                                         }
                                     } else {
                                         error!("Query finished with no closest peers.")
@@ -344,7 +370,7 @@ async fn run(
                                     if !peers.is_empty() {
                                         error!("Query timed out with closest peers: {:#?}", peers);
                                         for peer in peers {
-                                            debug!("Got peer {peer}");
+                                            debug!("Got peer {:?}", peer);
                                         }
                                     } else {
                                         error!("Query timed out with no closest peers.");
@@ -557,8 +583,8 @@ async fn run(
                                 error!("OutgoingConnectionError: LocalPeerId: We are dialing ourselves");
                                 true
                             }
-                            swarm::DialError::WrongPeerId { obtained, endpoint } => {
-                                error!("OutgoingConnectionError: WrongPeerId: obtained: {obtained:?}, endpoint: {endpoint:?}");
+                            swarm::DialError::WrongPeerId { obtained, address } => {
+                                error!("OutgoingConnectionError: WrongPeerId: obtained: {obtained:?}, address: {address:?}");
                                 true
                             }
                             swarm::DialError::Denied { cause } => {
@@ -717,30 +743,6 @@ fn create_gossipsub_behavior(id_keys: Keypair) -> Behaviour<CompressionTransform
         message.data.hash(&mut s);
         MessageId::from(s.finish().to_string())
     };
-    impl gossipsub::DataTransform for CompressionTransform {
-        fn inbound_transform(
-            &self,
-            raw_message: gossipsub::RawMessage,
-        ) -> Result<gossipsub::Message, std::io::Error> {
-            let buf: Vec<u8> = zstd::decode_all(&*raw_message.data)?;
-            Ok(gossipsub::Message {
-                source: raw_message.source,
-                data: buf,
-                sequence_number: raw_message.sequence_number,
-                topic: raw_message.topic,
-            })
-        }
-
-        fn outbound_transform(
-            &self,
-            _topic: &gossipsub::TopicHash,
-            data: Vec<u8>,
-        ) -> Result<Vec<u8>, std::io::Error> {
-            let compressed_bytes = zstd::encode_all(&*data, 0)?;
-            debug!("Compressed size {}", compressed_bytes.len());
-            Ok(compressed_bytes)
-        }
-    }
 
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(10))
@@ -752,7 +754,6 @@ fn create_gossipsub_behavior(id_keys: Keypair) -> Behaviour<CompressionTransform
     Behaviour::new_with_transform(
         MessageAuthenticity::Signed(id_keys),
         gossipsub_config,
-        None,
         CompressionTransform,
     )
     .expect("Correct configuration")

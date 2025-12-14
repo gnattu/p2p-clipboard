@@ -11,6 +11,23 @@ struct Handler {
     sender: mpsc::Sender<String>,
 }
 
+impl ClipboardHandler for Handler {
+    fn on_clipboard_change(&mut self) -> CallbackResult {
+        debug!("Clipboard change happened!");
+        get_clipboard_content(self.sender.clone());
+        CallbackResult::Next
+    }
+
+    fn on_clipboard_error(&mut self, error: io::Error) -> CallbackResult {
+        error!("Error: {}", error);
+        CallbackResult::Next
+    }
+
+    fn sleep_interval(&self) -> core::time::Duration {
+        core::time::Duration::from_millis(1000)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"), about = env!("CARGO_PKG_DESCRIPTION"))]
 struct Args {
@@ -62,22 +79,6 @@ fn set_clipboard_content(content: &str) {
 
 fn create_clipboard_monitor(sender: mpsc::Sender<String>) -> Master<Handler> {
     let handler = Handler { sender };
-    impl ClipboardHandler for Handler {
-        fn on_clipboard_change(&mut self) -> CallbackResult {
-            debug!("Clipboard change happened!");
-            get_clipboard_content(self.sender.clone());
-            CallbackResult::Next
-        }
-
-        fn on_clipboard_error(&mut self, error: io::Error) -> CallbackResult {
-            error!("Error: {}", error);
-            CallbackResult::Next
-        }
-
-        fn sleep_interval(&self) -> core::time::Duration {
-            core::time::Duration::from_millis(1000)
-        }
-    }
     let master = Master::new(handler);
     return master.unwrap();
 }
