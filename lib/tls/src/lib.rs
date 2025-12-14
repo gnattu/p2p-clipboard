@@ -48,21 +48,26 @@ pub fn make_client_config(
 ) -> Result<rustls::ClientConfig, certificate::GenError> {
     let (certificate, private_key) = certificate::generate(keypair, psk.clone())?;
     let token = cpuid_aes::init();
+    let mut provider = rustls::crypto::ring::default_provider();
     let cipher_suites = match token.get() {
         true => verifier::CIPHERSUITES,
         false => verifier::CIPHERSUITES_WITHOUT_AES,
     };
+    provider.cipher_suites = cipher_suites.to_vec();
 
-    let mut crypto = rustls::ClientConfig::builder()
-        .with_cipher_suites(cipher_suites)
-        .with_safe_default_kx_groups()
+    let cert_resolver = Arc::new(
+        certificate::AlwaysResolvesCert::new(certificate, &private_key)
+            .expect("Client cert key DER is valid; qed"),
+    );
+
+    let mut crypto = rustls::ClientConfig::builder_with_provider(provider.into())
         .with_protocol_versions(verifier::PROTOCOL_VERSIONS)
         .expect("Cipher suites and kx groups are configured; qed")
+        .dangerous()
         .with_custom_certificate_verifier(Arc::new(
             verifier::Libp2pCertificateVerifier::with_remote_peer_id(remote_peer_id, psk),
         ))
-        .with_client_auth_cert(vec![certificate], private_key)
-        .expect("Client cert key DER is valid; qed");
+        .with_client_cert_resolver(cert_resolver);
     crypto.alpn_protocols = vec![P2P_ALPN.to_vec()];
 
     Ok(crypto)
@@ -75,19 +80,23 @@ pub fn make_server_config(
 ) -> Result<rustls::ServerConfig, certificate::GenError> {
     let (certificate, private_key) = certificate::generate(keypair, psk.clone())?;
     let token = cpuid_aes::init();
+    let mut provider = rustls::crypto::ring::default_provider();
     let cipher_suites = match token.get() {
         true => verifier::CIPHERSUITES,
         false => verifier::CIPHERSUITES_WITHOUT_AES,
     };
+    provider.cipher_suites = cipher_suites.to_vec();
 
-    let mut crypto = rustls::ServerConfig::builder()
-        .with_cipher_suites(cipher_suites)
-        .with_safe_default_kx_groups()
+    let cert_resolver = Arc::new(
+        certificate::AlwaysResolvesCert::new(certificate, &private_key)
+            .expect("Server cert key DER is valid; qed"),
+    );
+
+    let mut crypto = rustls::ServerConfig::builder_with_provider(provider.into())
         .with_protocol_versions(verifier::PROTOCOL_VERSIONS)
         .expect("Cipher suites and kx groups are configured; qed")
         .with_client_cert_verifier(Arc::new(verifier::Libp2pCertificateVerifier::new(psk)))
-        .with_single_cert(vec![certificate], private_key)
-        .expect("Server cert key DER is valid; qed");
+        .with_cert_resolver(cert_resolver);
     crypto.alpn_protocols = vec![P2P_ALPN.to_vec()];
 
     Ok(crypto)

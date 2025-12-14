@@ -26,6 +26,7 @@ use libp2p_identity as identity;
 use libp2p_identity::PeerId;
 use x509_parser::{prelude::*, signature_algorithm::SignatureAlgorithm};
 use ring::{hmac, aead};
+use std::sync::Arc;
 
 /// The libp2p Public Key Extension is a X.509 extension
 /// with the Object Identifier 1.3.6.1.4.1.53594.1.1,
@@ -43,43 +44,86 @@ const P2P_SIGNING_PREFIX: [u8; 21] = *b"libp2p-tls-handshake:";
 // Similarly, hash functions with an output length less than 256 bits MUST NOT be used.
 static P2P_SIGNATURE_ALGORITHM: &rcgen::SignatureAlgorithm = &rcgen::PKCS_ECDSA_P256_SHA256;
 
+#[derive(Debug)]
+pub struct AlwaysResolvesCert(Arc<rustls::sign::CertifiedKey>);
+
+impl AlwaysResolvesCert {
+    pub fn new(
+        cert: rustls::pki_types::CertificateDer<'static>,
+        key: &rustls::pki_types::PrivateKeyDer<'_>,
+    ) -> Result<Self, rustls::Error> {
+        let certified_key = rustls::sign::CertifiedKey::new(
+            vec![cert],
+            rustls::crypto::ring::sign::any_ecdsa_type(key)?,
+        );
+        Ok(Self(Arc::new(certified_key)))
+    }
+}
+
+impl rustls::client::ResolvesClientCert for AlwaysResolvesCert {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _sigschemes: &[rustls::SignatureScheme],
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(Arc::clone(&self.0))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+impl rustls::server::ResolvesServerCert for AlwaysResolvesCert {
+    fn resolve(
+        &self,
+        _client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(Arc::clone(&self.0))
+    }
+}
+
 /// Generates a self-signed TLS certificate that includes a libp2p-specific
 /// certificate extension containing the public key of the given keypair.
 pub fn generate(
     identity_keypair: &identity::Keypair,
     pre_shared_key: Option<String>,
-) -> Result<(rustls::Certificate, rustls::PrivateKey), GenError> {
+) -> Result<
+    (
+        rustls::pki_types::CertificateDer<'static>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    GenError,
+> {
     // Keypair used to sign the certificate.
     // SHOULD NOT be related to the host's key.
     // Endpoints MAY generate a new key and certificate
     // for every connection attempt, or they MAY reuse the same key
     // and certificate for multiple connections.
-    let certificate_keypair = rcgen::KeyPair::generate(P2P_SIGNATURE_ALGORITHM)?;
-    let rustls_key = rustls::PrivateKey(certificate_keypair.serialize_der());
+    let certificate_keypair = rcgen::KeyPair::generate_for(P2P_SIGNATURE_ALGORITHM)?;
+    let rustls_key = rustls::pki_types::PrivateKeyDer::from(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(certificate_keypair.serialize_der()),
+    );
 
     let certificate = {
-        let mut params = rcgen::CertificateParams::new(vec![]);
+        let mut params = rcgen::CertificateParams::default();
         params.distinguished_name = rcgen::DistinguishedName::new();
         params.custom_extensions.push(make_libp2p_extension(
             identity_keypair,
             &certificate_keypair,
             pre_shared_key,
         )?);
-        params.alg = P2P_SIGNATURE_ALGORITHM;
-        params.key_pair = Some(certificate_keypair);
-        rcgen::Certificate::from_params(params)?
+        params.self_signed(&certificate_keypair)?
     };
 
-    let rustls_certificate = rustls::Certificate(certificate.serialize_der()?);
-
-    Ok((rustls_certificate, rustls_key))
+    Ok((certificate.into(), rustls_key))
 }
 
 /// Attempts to parse the provided bytes as a [`P2pCertificate`].
 ///
 /// For this to succeed, the certificate must contain the specified extension and the signature must
 /// match the embedded public key.
-pub fn parse(certificate: &rustls::Certificate, pre_shared_key: Option<String>) -> Result<P2pCertificate<'_>, ParseError> {
+pub fn parse<'a>(certificate: &'a rustls::pki_types::CertificateDer<'a>, pre_shared_key: Option<String>) -> Result<P2pCertificate<'a>, ParseError> {
     let certificate = parse_unverified(certificate.as_ref(), pre_shared_key)?;
 
     certificate.verify()?;
@@ -133,7 +177,7 @@ pub struct P2pExtension {
 
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
-pub struct GenError(#[from] rcgen::RcgenError);
+pub struct GenError(#[from] rcgen::Error);
 
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
@@ -146,7 +190,7 @@ pub struct VerificationError(#[from] pub(crate) webpki::Error);
 /// Internal function that only parses but does not verify the certificate.
 ///
 /// Useful for testing but unsuitable for production.
-fn parse_unverified(der_input: &[u8], pre_shared_key: Option<String>) -> Result<P2pCertificate, webpki::Error> {
+fn parse_unverified(der_input: &[u8], pre_shared_key: Option<String>) -> Result<P2pCertificate<'_>, webpki::Error> {
     let x509 = X509Certificate::from_der(der_input)
         .map(|(_rest_input, x509)| x509)
         .map_err(|_| webpki::Error::BadDer)?;
@@ -164,7 +208,7 @@ fn parse_unverified(der_input: &[u8], pre_shared_key: Option<String>) -> Result<
         }
 
         if oid == &p2p_ext_oid {
-            // The public host key and the signature are ANS.1-encoded
+            // The public host key and the signature are ASN.1-encoded
             // into the SignedKey data structure, which is carried
             // in the libp2p Public Key Extension.
             // SignedKey ::= SEQUENCE {
@@ -226,7 +270,7 @@ fn make_libp2p_extension(
     identity_keypair: &identity::Keypair,
     certificate_keypair: &rcgen::KeyPair,
     pre_shared_key: Option<String>,
-) -> Result<rcgen::CustomExtension, rcgen::RcgenError> {
+) -> Result<rcgen::CustomExtension, rcgen::Error> {
     let serialized_pubkey = identity_keypair.public().encode_protobuf();
     // The peer signs the concatenation of the string `libp2p-tls-handshake:`
     // and the public key that it used to generate the certificate carrying
@@ -238,15 +282,15 @@ fn make_libp2p_extension(
 
         let raw = identity_keypair
             .sign(&msg)
-            .map_err(|_| rcgen::RcgenError::RingUnspecified)?;
+            .map_err(|_| rcgen::Error::RingUnspecified)?;
         match pre_shared_key {
             Some(psk) => encrypt_ext_signature(raw, &psk, &serialized_pubkey)
-                .map_err(|_| rcgen::RcgenError::RingKeyRejected("PSK encryption failed"))?,
+                .map_err(|_| rcgen::Error::RingKeyRejected("PSK encryption failed".into()))?,
             None => raw
         }
     };
 
-    // The public host key and the signature are ANS.1-encoded
+    // The public host key and the signature are ASN.1-encoded
     // into the SignedKey data structure, which is carried
     // in the libp2p Public Key Extension.
     // SignedKey ::= SEQUENCE {
@@ -270,8 +314,8 @@ impl P2pCertificate<'_> {
         self.extension.public_key.to_peer_id()
     }
 
-    /// Verify the `signature` of the `message` signed by the private key corresponding to the public key stored
-    /// in the certificate.
+    /// Verify the `signature` of the `message` signed by the private key corresponding to the
+    /// public key stored in the certificate.
     pub fn verify_signature(
         &self,
         signature_scheme: rustls::SignatureScheme,

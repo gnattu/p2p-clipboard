@@ -28,7 +28,7 @@ use libp2p_core::upgrade::{InboundConnectionUpgrade, OutboundConnectionUpgrade};
 use libp2p_core::UpgradeInfo;
 use libp2p_identity as identity;
 use libp2p_identity::PeerId;
-use rustls::{CommonState, ServerName};
+use rustls::{CommonState, pki_types::ServerName};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -111,9 +111,13 @@ where
 
     fn upgrade_outbound(self, socket: C, _: Self::Info) -> Self::Future {
         async move {
-            // Spec: In order to keep this flexibility for future versions, clients that only support the version of the handshake defined in this document MUST NOT send any value in the Server Name Indication.
-            // Setting `ServerName` to unspecified will disable the use of the SNI extension.
-            let name = ServerName::IpAddress(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+            // Spec: In order to keep this flexibility for future versions, clients that only
+            // support the version of the handshake defined in this document MUST NOT send any value
+            // in the Server Name Indication. Setting `ServerName` to unspecified will
+            // disable the use of the SNI extension.
+            let name = ServerName::IpAddress(rustls::pki_types::IpAddr::from(IpAddr::V4(
+                Ipv4Addr::UNSPECIFIED,
+            )));
 
             let stream = futures_rustls::TlsConnector::from(Arc::new(self.client))
                 .connect(name, socket)
