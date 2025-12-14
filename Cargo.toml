@@ -7,11 +7,11 @@ license = "MIT"
 authors = ["gnattu"]
 
 [dependencies]
-arboard = { version = "3.3.0",features = ["wayland-data-control"] }
+arboard = { version = "3.6.1",features = ["wayland-data-control"] }
 clipboard-master = { git = "https://github.com/gnattu/clipboard-master.git" }
-tokio = { version = "1.35.1", features = ["full"] }
+tokio = { version = "1.38", features = ["full"] }
 async-task = "4.7.0"
-libp2p = { version = "0.53.2", features = ["tokio", "gossipsub", "macros", "identify", "kad", "tcp", "yamux"] }
+libp2p = { version = "0.56.0", features = ["tokio", "gossipsub", "macros", "identify", "kad", "tcp", "yamux"] }
 futures = "0.3.30"
 log = "0.4.20"
 clap = { version = "4.4.18", features = ["derive"] }
