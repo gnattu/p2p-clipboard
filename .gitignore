@@ -5,3 +5,6 @@ private-key.pem
 
 # Finder (MacOS) folder config
 .DS_Store
+
+.cargo-home
+lib/**/target
