@@ -107,7 +107,7 @@ Currently has following limitation:
 - Only supports pure text contents.
 - The max payload size over network is hardcoded to 64KB after compression at the moment, which is ~150KB raw data. This should be sufficient for most use cases, but it may be increased in the future.
 - The default zero-configuration setup is suitable only when everyone in your local network is trusted by you. While all data is encrypted with TLS, the default setting allows anyone running p2pclipboard in your local network to read your clipboard, potentially exposing sensitive information. **Use a PSK if not everyone in your LAN is trusted.**
-- **For Linux users:** Not all Wayland compositors are supported, so if your desktop environmen uses an unsupported compositor, you will need to use X11 instead. The Wayland standard protocol does not allow windowless applications like p2p-clipboard to access the user clipboard. Compositors need to implement their own protocols for such use cases. wlroots-based compositors and KDE's KWin implement the `wlr_data_control` protocol, but GNOME's Mutter and Wayland's own Weston do not.
+- **For Linux users:** Not all Wayland compositors are supported, so if your desktop environmen uses an unsupported compositor, you will need to use X11 instead. The Wayland standard protocol does not allow windowless applications like p2p-clipboard to access the user clipboard. As of v0.2.0, p2p-clipboard relies on the (ext_data_control_v1)[https://wayland.app/protocols/wayland-protocols/336] wayland extension to interact with the wayland clipboard. The support status of the extension is listed (here)[https://wayland.app/protocols/wayland-protocols/336#compositor-support]
 
 ## License
 
