@@ -1,0 +1,167 @@
+name: Draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag for the release (e.g. v0.1.0)"
+        required: true
+        type: string
+      draft:
+        description: "Create the GitHub release as a draft"
+        required: true
+        default: true
+        type: boolean
+      prerelease:
+        description: "Mark the GitHub release as a prerelease"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: p2p-clipboard-x86_64-unknown-linux-gnu.zip
+            kind: linux
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: p2p-clipboard-aarch64-unknown-linux-gnu.zip
+            kind: linux
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: p2p-clipboard-x86_64-pc-windows-msvc.zip
+            kind: windows
+          - os: macos-latest
+            target: ""
+            asset: p2p-clipboard-universal-apple-darwin.zip
+            kind: macos-universal
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust target
+        if: ${{ matrix.target != '' }}
+        run: |
+          rustup target add "${{ matrix.target }}"
+
+      - name: Install macOS targets (universal build)
+        if: matrix.kind == 'macos-universal'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux system deps
+        if: matrix.kind == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libwayland-dev libxkbcommon-dev
+
+      - name: Build (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package (Linux)
+        if: matrix.kind == 'linux'
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/p2p-clipboard" dist/p2p-clipboard
+          (cd dist && zip -9 "../${{ matrix.asset }}" p2p-clipboard)
+
+      - name: Build (Windows)
+        if: matrix.kind == 'windows'
+        run: |
+          cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Package (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item "target\\${{ matrix.target }}\\release\\p2p-clipboard.exe" "dist\\p2p-clipboard.exe"
+          Compress-Archive -Path "dist\\p2p-clipboard.exe" -DestinationPath "${{ matrix.asset }}" -Force
+
+      - name: Build (macOS universal)
+        if: matrix.kind == 'macos-universal'
+        run: |
+          bash scripts/build_universal_mac.sh
+
+      - name: Package (macOS universal)
+        if: matrix.kind == 'macos-universal'
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          cp "target/universal-apple-darwin/release/p2p-clipboard" dist/p2p-clipboard
+          (cd dist && zip -9 "../${{ matrix.asset }}" p2p-clipboard)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    name: Draft GitHub release
+    runs-on: ubuntu-latest
+    needs: [build]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      DRAFT: ${{ inputs.draft }}
+      PRERELEASE: ${{ inputs.prerelease }}
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create or update release
+        run: |
+          set -euo pipefail
+
+          draft_flag=()
+          if [ "${DRAFT}" = "true" ]; then
+            draft_flag+=(--draft)
+          fi
+
+          prerelease_flag=()
+          if [ "${PRERELEASE}" = "true" ]; then
+            prerelease_flag+=(--prerelease)
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists. Uploading assets."
+          else
+            gh release create "${TAG}" \
+              --title "${TAG}" \
+              --notes "Automated build artifacts." \
+              --target "${GITHUB_SHA}" \
+              "${draft_flag[@]}" \
+              "${prerelease_flag[@]}"
+          fi
+
+          mapfile -d '' assets < <(find dist -type f -name 'p2p-clipboard-*.zip' -print0)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No zip assets found under dist/"
+            exit 1
+          fi
+
+          gh release upload "${TAG}" "${assets[@]}" --clobber
