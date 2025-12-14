@@ -124,6 +124,7 @@ jobs:
     needs: [build]
     env:
       GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
       TAG: ${{ inputs.tag }}
       DRAFT: ${{ inputs.draft }}
       PRERELEASE: ${{ inputs.prerelease }}
@@ -147,10 +148,10 @@ jobs:
             prerelease_flag+=(--prerelease)
           fi
 
-          if gh release view "${TAG}" >/dev/null 2>&1; then
+          if gh release view "${TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists. Uploading assets."
           else
-            gh release create "${TAG}" \
+            gh release create "${TAG}" --repo "${GH_REPO}" \
               --title "${TAG}" \
               --notes "Automated build artifacts." \
               --target "${GITHUB_SHA}" \
@@ -164,4 +165,4 @@ jobs:
             exit 1
           fi
 
-          gh release upload "${TAG}" "${assets[@]}" --clobber
+          gh release upload "${TAG}" --repo "${GH_REPO}" "${assets[@]}" --clobber
