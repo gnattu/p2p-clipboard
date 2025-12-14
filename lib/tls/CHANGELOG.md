@@ -1,3 +1,7 @@
+## 0.6.0
+
+- Sync upstream v0.6.0
+
 ## 0.4.0
 
 - Fork from upstream, tweaked for p2p-clipboard

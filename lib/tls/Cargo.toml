@@ -1,6 +1,6 @@
 [package]
 name = "libp2p-tls"
-version = "0.4.0"
+version = "0.6.0"
 edition = "2021"
 description = "TLS configuration based on libp2p TLS specs. Tweaked for p2p-clipboard"
 repository = "https://github.com/libp2p/rust-libp2p"
